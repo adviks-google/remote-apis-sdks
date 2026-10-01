@@ -301,7 +301,7 @@ type metaPrefetcher struct {
 	cache    filemetadata.Cache
 	execRoot string
 	opts     *TreeSymlinkOpts
-	pending  map[string]*metaFuture // Keyed by queued absolute path; prevents duplicate in-flight prefetches. Owned by calling goroutine.
+	pending  map[string]*metaFuture // Keyed by queued path; prevents duplicate in-flight prefetches. Owned by calling goroutine.
 	work     chan *metaFuture
 	stopped  atomic.Bool
 	wg       sync.WaitGroup
@@ -323,6 +323,9 @@ const prefetchQueueSize = 4096
 func newMetaPrefetcher(cache filemetadata.Cache, execRoot string, opts *TreeSymlinkOpts, workers int) *metaPrefetcher {
 	if workers < 1 {
 		return nil // A blocking send with no workers would deadlock.
+	}
+	if opts == nil {
+		opts = DefaultTreeSymlinkOpts()
 	}
 	p := &metaPrefetcher{
 		cache:    cache,
@@ -349,7 +352,7 @@ func newMetaPrefetcher(cache filemetadata.Cache, execRoot string, opts *TreeSyml
 // lookup computes the metadata of the same path that loadFiles will look up for f.relPath.
 func (p *metaPrefetcher) lookup(f *metaFuture) {
 	rel := f.relPath
-	if p.opts.Preserved {
+	if p.opts != nil && p.opts.Preserved {
 		// Mirror loadFiles: with preserved symlinks it looks up the path with its parent symlinks
 		// evaluated. On error loadFiles fails before looking anything up, so skip the lookup.
 		evaled, _, err := evalParentSymlinks(p.execRoot, rel, p.opts.MaterializeOutsideExecRoot, p.cache)
@@ -368,12 +371,11 @@ func (p *metaPrefetcher) prefetchOne(rel string) {
 	if p == nil || rel == "" || p.stopped.Load() {
 		return
 	}
-	key := filepath.Join(p.execRoot, rel)
-	if _, ok := p.pending[key]; ok {
+	if _, ok := p.pending[rel]; ok {
 		return
 	}
 	f := &metaFuture{relPath: rel, done: make(chan struct{})}
-	p.pending[key] = f
+	p.pending[rel] = f
 	p.work <- f
 }
 
@@ -388,9 +390,8 @@ func (p *metaPrefetcher) prefetch(relPaths ...string) {
 // prefetch if there is one.
 func (p *metaPrefetcher) get(cache filemetadata.Cache, queuedPath, absPath string) *filemetadata.Metadata {
 	if p != nil {
-		key := filepath.Join(p.execRoot, queuedPath)
-		if f, ok := p.pending[key]; ok {
-			delete(p.pending, key)
+		if f, ok := p.pending[queuedPath]; ok {
+			delete(p.pending, queuedPath)
 			if f.claimed.CompareAndSwap(false, true) {
 				// No worker has started it; look it up here rather than waiting for one.
 				return cache.Get(absPath)
